@@ -44,7 +44,7 @@ header p{color:#86868b;font-size:14px;margin-top:4px}
 .summary{font-size:13px;color:#86868b;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid #e5e5e5}
 footer{text-align:center;padding:20px;color:#86868b;font-size:13px;border-top:1px solid #e5e5e5;background:#fff;margin-top:auto}
 footer a{color:#ff6b6b;text-decoration:none}
-.hidden{display:none}
+.hidden{display:none!important}
 .loading{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:999}
 .loading-inner{background:#fff;padding:32px;border-radius:16px;text-align:center;font-size:16px}
 .spinner{width:40px;height:40px;border:3px solid #e5e5e5;border-top-color:#ff6b6b;border-radius:50%;animation:spin 1s linear infinite;margin:0 auto 12px}
@@ -264,6 +264,9 @@ function processImage(){
       document.getElementById('outputSection').classList.remove('hidden');
       document.getElementById('downloadPng').disabled=false;
       document.getElementById('downloadPdf').disabled=false;
+    }catch(err){
+      alert('生成出错: '+err.message);
+      console.error(err);
     }finally{
       document.getElementById('loadingOverlay').classList.add('hidden');
     }
