@@ -1,0 +1,28 @@
+{
+  "name": "pixelbead",
+  "version": "1.0.0",
+  "description": "Convert images into perler bead (拼豆) patterns",
+  "main": "dist/index.js",
+  "bin": {
+    "pixelbead": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts"
+  },
+  "keywords": ["perler", "bead", "pixel", "art", "pattern", "拼豆"],
+  "license": "MIT",
+  "dependencies": {
+    "chalk": "^4.1.2",
+    "@napi-rs/canvas": "^0.1.44",
+    "commander": "^11.1.0",
+    "pdfkit": "^0.13.0",
+    "sharp": "^0.33.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/pdfkit": "^0.13.1",
+    "typescript": "^5.3.3"
+  }
+}
