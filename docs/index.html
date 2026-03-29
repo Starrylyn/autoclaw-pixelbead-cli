@@ -109,7 +109,7 @@ footer a{color:#ff6b6b;text-decoration:none}
 <button class="btn btn-secondary" id="downloadPng" disabled>下载 PNG</button>
 <button class="btn btn-secondary" id="downloadPdf" disabled>下载 PDF</button>
 </div>
-<div class="output hidden" id="outputSection">
+<div class="output" id="outputSection" style="display:none">
 <div class="preview-wrap">
 <canvas id="previewCanvas"></canvas>
 </div>
@@ -120,7 +120,7 @@ footer a{color:#ff6b6b;text-decoration:none}
 </div>
 </div>
 </div>
-<div class="loading hidden" id="loadingOverlay">
+<div class="loading" id="loadingOverlay" style="display:none">
 <div class="loading-inner"><div class="spinner"></div>生成中...</div>
 </div>
 <footer>
@@ -155,7 +155,7 @@ function processImage(){
   const brand=document.getElementById('brand').value;
   const palette=parsePalette(brand);
   
-  document.getElementById('loadingOverlay').classList.remove('hidden');
+  document.getElementById('loadingOverlay').style.display='flex';
   
   setTimeout(()=>{
     try{
@@ -261,14 +261,14 @@ function processImage(){
       lastResult={grid,size,colorCounts,brand,cleanMode};
       renderCanvas(lastResult);
       renderMaterials(lastResult);
-      document.getElementById('outputSection').classList.remove('hidden');
+      document.getElementById('outputSection').style.display='flex';
       document.getElementById('downloadPng').disabled=false;
       document.getElementById('downloadPdf').disabled=false;
     }catch(err){
       alert('生成出错: '+err.message);
       console.error(err);
     }finally{
-      document.getElementById('loadingOverlay').classList.add('hidden');
+      document.getElementById('loadingOverlay').style.display='none';
     }
   },50);
 }
