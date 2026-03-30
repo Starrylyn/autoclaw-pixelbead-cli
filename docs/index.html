@@ -141,9 +141,16 @@ footer .ft-brand img{width:20px;height:20px;border-radius:5px}
 <span class="range-val" id="maxColorsVal">30</span>
 </div>
 <div class="sep"></div>
-<label><input type="checkbox" id="outline" checked> 描边</label>
-<label><input type="checkbox" id="noiseClean" checked> 降噪</label>
-<label><input type="checkbox" id="cleanMode"> 纯净</label>
+    <label><input type="checkbox" id="outline" checked> 描边</label>
+    <label><input type="checkbox" id="outlineBlack"> 黑色描边</label>
+    <label><input type="checkbox" id="noiseClean" checked> 降噪</label>
+    <label><input type="checkbox" id="cleanMode"> 纯净</label>
+    <div class="sep"></div>
+    <label><input type="checkbox" id="minimizeColors"> 最小化颜色数</label>
+    <div class="range-group">
+      <input type="range" id="minimizeTarget" min="5" max="30" value="15" disabled>
+      <span class="range-val" id="minimizeTargetVal">15</span>
+    </div>
 </div>
 <div class="preview-grid" id="previewGrid"></div>
 </div>
@@ -222,17 +229,46 @@ function preparePalette(colors){return colors.map(c=>{const rgb=hexToRgb(c[3]);r
 // ===== WEB WORKER (inline Blob) =====
 const WORKER_CODE=COLOR_SCIENCE_CODE+`
 self.onmessage=function(e){
-  const{id,size,pixels,brandColors,maxColors,doOutline,doNoise}=e.data;
+  const{id,size,pixels,brandColors,maxColors,doOutline,doNoise,doOutlineBlack,doMinimize,minimizeTarget}=e.data;
   const palette=preparePalette(brandColors);
   const grid=[];const counts=new Map();
   for(let y=0;y<size;y++){const row=[];for(let x=0;x<size;x++){const i=(y*size+x)*4;const m=findNearest(pixels[i],pixels[i+1],pixels[i+2],palette);row.push(m);counts.set(m.code,(counts.get(m.code)||0)+1)}grid.push(row)}
+
+  // === Smart color limiting with edge protection ===
   if(counts.size>maxColors){
-    const sorted=[...counts.entries()].sort((a,b)=>b[1]-a[1]);
-    const keep=new Set(sorted.slice(0,maxColors).map(e=>e[0]));
-    const kp=palette.filter(c=>keep.has(c.code));
-    for(let y=0;y<size;y++)for(let x=0;x<size;x++)if(!keep.has(grid[y][x].code))grid[y][x]=findNearest(grid[y][x].r,grid[y][x].g,grid[y][x].b,kp);
+    // Identify edge colors (>30% of beads on color boundaries)
+    const edgeStats=new Map();
+    for(let y=0;y<size;y++)for(let x=0;x<size;x++){
+      const code=grid[y][x].code;
+      let entry=edgeStats.get(code);
+      if(!entry){entry={total:0,edge:0};edgeStats.set(code,entry)}
+      entry.total++;
+      let isEdge=false;
+      for(const[dx,dy]of[[-1,0],[1,0],[0,-1],[0,1]]){
+        const nx=x+dx,ny=y+dy;
+        if(nx<0||nx>=size||ny<0||ny>=size){isEdge=true;break}
+        if(grid[ny][nx].code!==code){isEdge=true;break}
+      }
+      if(isEdge)entry.edge++;
+    }
+    const protectedCodes=new Set();
+    for(const[code,{total,edge}]of edgeStats){
+      if(total>0&&edge/total>0.3)protectedCodes.add(code);
+    }
+    // Build reduced palette: protected first, then fill by usage
+    const usedCodes=[...counts.entries()].map(([code,cnt])=>({code,cnt}));
+    const protEntries=usedCodes.filter(e=>protectedCodes.has(e.code)).sort((a,b)=>b.cnt-a.cnt);
+    const nonProtEntries=usedCodes.filter(e=>!protectedCodes.has(e.code)).sort((a,b)=>b.cnt-a.cnt);
+    const keepSet=new Set();
+    for(const e of protEntries){if(keepSet.size>=maxColors)break;keepSet.add(e.code)}
+    for(const e of nonProtEntries){if(keepSet.size>=maxColors)break;keepSet.add(e.code)}
+    const kp=palette.filter(c=>keepSet.has(c.code));
+    // Second pass: re-match with reduced palette
+    for(let y=0;y<size;y++)for(let x=0;x<size;x++)if(!keepSet.has(grid[y][x].code))grid[y][x]=findNearest(grid[y][x].r,grid[y][x].g,grid[y][x].b,kp);
     counts.clear();for(let y=0;y<size;y++)for(let x=0;x<size;x++)counts.set(grid[y][x].code,(counts.get(grid[y][x].code)||0)+1);
   }
+
+  // === Noise cleaning ===
   if(doNoise&&size>=29){
     const thr=Math.max(2,Math.floor(size/15));
     const vis=Array.from({length:size},()=>new Uint8Array(size));
@@ -243,7 +279,71 @@ self.onmessage=function(e){
     }
     counts.clear();for(let y=0;y<size;y++)for(let x=0;x<size;x++)counts.set(grid[y][x].code,(counts.get(grid[y][x].code)||0)+1);
   }
-  if(doOutline){
+
+  // === Color minimization (after maxColors, before outlines) ===
+  if(doMinimize&&minimizeTarget>0){
+    const MERGE_THR=25;
+    // Build lab map for used colors
+    const usedLabMap=new Map();
+    const usedCountMap=new Map();
+    for(const[code,cnt]of counts){
+      usedCountMap.set(code,cnt);
+      // find color in grid
+      for(let y=0;y<size&&!usedLabMap.has(code);y++)for(let x=0;x<size;x++)if(grid[y][x].code===code){usedLabMap.set(code,grid[y][x].lab||rgbToLab(grid[y][x].r,grid[y][x].g,grid[y][x].b));break}
+    }
+    while(usedCountMap.size>minimizeTarget){
+      const codes=[...usedCountMap.keys()];
+      if(codes.length<=1)break;
+      let bestDist=Infinity,mergeFrom='',mergeInto='';
+      for(let i=0;i<codes.length;i++){
+        const labI=usedLabMap.get(codes[i]);const countI=usedCountMap.get(codes[i]);
+        for(let j=i+1;j<codes.length;j++){
+          const labJ=usedLabMap.get(codes[j]);
+          const dist=ciede2000(labI,labJ);
+          if(dist<bestDist){
+            bestDist=dist;const countJ=usedCountMap.get(codes[j]);
+            if(countI<=countJ){mergeFrom=codes[i];mergeInto=codes[j]}
+            else{mergeFrom=codes[j];mergeInto=codes[i]}
+          }
+        }
+      }
+      if(bestDist>MERGE_THR)break;
+      // Find the target color object
+      let targetColor=null;
+      for(let y=0;y<size&&!targetColor;y++)for(let x=0;x<size;x++)if(grid[y][x].code===mergeInto){targetColor=grid[y][x];break}
+      if(!targetColor)break;
+      // Replace all mergeFrom with mergeInto
+      for(let y=0;y<size;y++)for(let x=0;x<size;x++)if(grid[y][x].code===mergeFrom)grid[y][x]=targetColor;
+      usedCountMap.set(mergeInto,usedCountMap.get(mergeInto)+usedCountMap.get(mergeFrom));
+      usedCountMap.delete(mergeFrom);usedLabMap.delete(mergeFrom);
+    }
+    counts.clear();for(let y=0;y<size;y++)for(let x=0;x<size;x++)counts.set(grid[y][x].code,(counts.get(grid[y][x].code)||0)+1);
+  }
+
+  // === Black outline mode (mutually exclusive with regular outline) ===
+  if(doOutlineBlack){
+    // Find the black bead in palette by name
+    let blackBead=null;
+    for(const c of palette){const n=c.nameEn.toLowerCase();if(n==='black'||n==='jet black'){blackBead=c;break}}
+    if(!blackBead){let darkestL=Infinity;for(const c of palette){if(c.lab.L<darkestL){darkestL=c.lab.L;blackBead=c}}}
+    if(blackBead){
+      const og=grid.map(r=>[...r]);
+      for(let y=0;y<size;y++)for(let x=0;x<size;x++){
+        const c=grid[y][x];const cLab=c.lab||rgbToLab(c.r,c.g,c.b);
+        let edgeFound=false;
+        for(const[dx,dy]of[[-1,0],[1,0],[0,-1],[0,1]]){
+          const nx=x+dx,ny=y+dy;
+          if(nx<0||nx>=size||ny<0||ny>=size)continue;
+          const nb=grid[ny][nx];const nbLab=nb.lab||rgbToLab(nb.r,nb.g,nb.b);
+          if(ciede2000(cLab,nbLab)>20){edgeFound=true;break}
+        }
+        if(edgeFound)og[y][x]=blackBead;
+      }
+      for(let y=0;y<size;y++)for(let x=0;x<size;x++)grid[y][x]=og[y][x];
+      counts.clear();for(let y=0;y<size;y++)for(let x=0;x<size;x++)counts.set(grid[y][x].code,(counts.get(grid[y][x].code)||0)+1);
+    }
+  }else if(doOutline){
+    // === Regular outline (darken edges) ===
     const og=grid.map(r=>[...r]);
     for(let y=0;y<size;y++)for(let x=0;x<size;x++){
       const c=grid[y][x];let border=false;
@@ -253,6 +353,7 @@ self.onmessage=function(e){
     for(let y=0;y<size;y++)for(let x=0;x<size;x++)grid[y][x]=og[y][x];
     counts.clear();for(let y=0;y<size;y++)for(let x=0;x<size;x++)counts.set(grid[y][x].code,(counts.get(grid[y][x].code)||0)+1);
   }
+
   const flatGrid=[];for(let y=0;y<size;y++)for(let x=0;x<size;x++){const c=grid[y][x];flatGrid.push(c.code,c.hex,c.nameCn,c.r,c.g,c.b)}
   self.postMessage({id,size,flatGrid,colorCounts:[...counts.entries()]});
 };
@@ -262,11 +363,11 @@ const workerUrl=URL.createObjectURL(workerBlob);
 const worker=new Worker(workerUrl);
 const workerCallbacks={};let workerIdSeq=0;
 worker.onmessage=function(e){const{id}=e.data;if(workerCallbacks[id]){workerCallbacks[id](e.data);delete workerCallbacks[id]}};
-function workerProcess(size,pixels,brandColors,maxColors,doOutline,doNoise){
+function workerProcess(size,pixels,brandColors,maxColors,doOutline,doNoise,doOutlineBlack,doMinimize,minimizeTarget){
   return new Promise(resolve=>{
     const id=++workerIdSeq;
     workerCallbacks[id]=resolve;
-    worker.postMessage({id,size,pixels:Array.from(pixels),brandColors,maxColors,doOutline,doNoise});
+    worker.postMessage({id,size,pixels:Array.from(pixels),brandColors,maxColors,doOutline,doNoise,doOutlineBlack,doMinimize,minimizeTarget});
   });
 }
 
@@ -429,16 +530,27 @@ async function generateAll(){
   const maxColors=+document.getElementById('maxColors').value;
   const doOutline=document.getElementById('outline').checked;
   const doNoise=document.getElementById('noiseClean').checked;
+  const doOutlineBlack=document.getElementById('outlineBlack').checked;
+  const doMinimize=document.getElementById('minimizeColors').checked;
+  const minimizeTarget=+document.getElementById('minimizeTarget').value;
   const brandColors=PALETTES[currentBrand].colors;
   for(let idx=0;idx<SIZES.length;idx++){
     const s=SIZES[idx];
     bar.style.width=`${10+idx/SIZES.length*90}%`;
-    const off=document.createElement('canvas');off.width=s.size;off.height=s.size;
+    const off=document.createElement('canvas');
+    // Adaptive scaling: upscale to intermediate size first, then downsample for better color extraction
+    const maxDim=s.size;
+    const scale=maxDim<=39?8:maxDim<=80?6:5;
+    const interW=s.size*scale,interH=s.size*scale;
+    const interCanvas=document.createElement('canvas');interCanvas.width=interW;interCanvas.height=interH;
+    const ictx=interCanvas.getContext('2d');ictx.imageSmoothingEnabled=true;ictx.imageSmoothingQuality='high';
+    ictx.drawImage(croppedImage,0,0,interW,interH);
+    off.width=s.size;off.height=s.size;
     const octx=off.getContext('2d');octx.imageSmoothingEnabled=true;octx.imageSmoothingQuality='high';
-    octx.drawImage(croppedImage,0,0,s.size,s.size);
+    octx.drawImage(interCanvas,0,0,s.size,s.size);
     const pixels=octx.getImageData(0,0,s.size,s.size).data;
     try{
-      const r=await workerProcess(s.size,pixels,brandColors,maxColors,doOutline,doNoise);
+      const r=await workerProcess(s.size,pixels,brandColors,maxColors,doOutline,doNoise,doOutlineBlack,doMinimize,minimizeTarget);
       const grid=unflattenGrid(r.flatGrid,s.size);
       const colorCounts=new Map(r.colorCounts);
       const result={grid,size:s.size,colorCounts,brand:currentBrand};
@@ -514,8 +626,21 @@ function loadFile(file){
 // ===== SETTINGS =====
 document.getElementById('maxColors').addEventListener('input',e=>{document.getElementById('maxColorsVal').textContent=e.target.value});
 document.getElementById('maxColors').addEventListener('change',()=>{if(croppedImage)generateAll()});
-document.getElementById('outline').addEventListener('change',()=>{if(croppedImage)generateAll()});
+document.getElementById('outline').addEventListener('change',()=>{
+  if(document.getElementById('outline').checked)document.getElementById('outlineBlack').checked=false;
+  if(croppedImage)generateAll();
+});
+document.getElementById('outlineBlack').addEventListener('change',()=>{
+  if(document.getElementById('outlineBlack').checked)document.getElementById('outline').checked=false;
+  if(croppedImage)generateAll();
+});
 document.getElementById('noiseClean').addEventListener('change',()=>{if(croppedImage)generateAll()});
+document.getElementById('minimizeColors').addEventListener('change',()=>{
+  document.getElementById('minimizeTarget').disabled=!document.getElementById('minimizeColors').checked;
+  if(croppedImage)generateAll();
+});
+document.getElementById('minimizeTarget').addEventListener('input',e=>{document.getElementById('minimizeTargetVal').textContent=e.target.value});
+document.getElementById('minimizeTarget').addEventListener('change',()=>{if(croppedImage&&document.getElementById('minimizeColors').checked)generateAll()});
 </script>
 </body>
 </html>
