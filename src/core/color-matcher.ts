@@ -130,13 +130,86 @@ export function matchColors(
 }
 
 /**
+ * Identify "edge colors" — colors whose beads frequently appear at colour
+ * boundaries.  A bead is at an edge position if at least one of its
+ * 4-connected neighbours is a different colour.  If more than 30% of a
+ * colour's beads are at edge positions, the colour is considered an edge
+ * colour and should be protected from removal during palette reduction.
+ *
+ * @param grid    The matched bead grid from the first pass.
+ * @param width   Grid width.
+ * @param height  Grid height.
+ * @returns A Set of bead colour codes that are marked as protected.
+ */
+function identifyEdgeColors(
+  grid: BeadColor[][],
+  width: number,
+  height: number,
+): Set<string> {
+  /** Per-color tracking: total bead count and count of edge beads. */
+  const stats = new Map<string, { total: number; edge: number }>();
+
+  const dx = [0, 0, -1, 1];
+  const dy = [-1, 1, 0, 0];
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const cell = grid[y][x];
+      const key = cell.code;
+
+      let entry = stats.get(key);
+      if (!entry) {
+        entry = { total: 0, edge: 0 };
+        stats.set(key, entry);
+      }
+      entry.total++;
+
+      // Check if this bead is at an edge (adjacent to a different colour).
+      for (let d = 0; d < 4; d++) {
+        const nx = x + dx[d];
+        const ny = y + dy[d];
+
+        if (nx < 0 || nx >= width || ny < 0 || ny >= height) {
+          // Grid boundary counts as an edge.
+          entry.edge++;
+          break;
+        }
+
+        if (grid[ny][nx].code !== key) {
+          entry.edge++;
+          break;
+        }
+      }
+    }
+  }
+
+  // Colours with > 30% edge beads are protected.
+  const EDGE_RATIO_THRESHOLD = 0.3;
+  const protectedColors = new Set<string>();
+
+  for (const [code, { total, edge }] of stats) {
+    if (total > 0 && edge / total > EDGE_RATIO_THRESHOLD) {
+      protectedColors.add(code);
+    }
+  }
+
+  return protectedColors;
+}
+
+/**
  * Match pixels to bead colors, but limit the result to at most `maxColors`
  * distinct bead colors.
  *
  * Algorithm:
- *   1. First pass: match all pixels to nearest colors, count usage.
- *   2. If distinct colors used > maxColors, keep only the top-used colors
- *      and re-match all pixels against that reduced palette.
+ *   1. First pass: match all pixels to nearest colors (full palette).
+ *   2. Identify edge colors — colors whose beads are predominantly at
+ *      colour boundaries (>30% edge ratio).  These are protected.
+ *   3. Protected colours are forcibly kept in the reduced palette; the
+ *      remaining quota is filled with the most-used non-protected colours.
+ *   4. Second pass: re-match all pixels against the reduced palette.
+ *
+ * This preserves detail-defining edge colours that would otherwise be
+ * dropped by a purely usage-based top-N selection.
  */
 export function matchColorsWithLimit(
   pixelGrid: PixelGrid,
@@ -159,13 +232,46 @@ export function matchColorsWithLimit(
     return firstPass;
   }
 
-  // Sort colors by usage (most used first) and keep top maxColors
-  const sortedEntries = Array.from(firstPass.colorCounts.values())
+  // Identify edge colours that should be protected.
+  const protectedCodes = identifyEdgeColors(
+    firstPass.grid,
+    firstPass.width,
+    firstPass.height,
+  );
+
+  // Build the reduced palette:
+  // 1. All protected colours go in first (as long as they were actually used).
+  // 2. Remaining slots filled by top-usage non-protected colours.
+  const usedEntries = Array.from(firstPass.colorCounts.values());
+
+  const protectedEntries = usedEntries
+    .filter((e) => protectedCodes.has(e.color.code))
     .sort((a, b) => b.count - a.count);
 
-  const reducedPalette = sortedEntries
-    .slice(0, maxColors)
-    .map((entry) => entry.color);
+  const nonProtectedEntries = usedEntries
+    .filter((e) => !protectedCodes.has(e.color.code))
+    .sort((a, b) => b.count - a.count);
+
+  const reducedPalette: BeadColor[] = [];
+  const addedCodes = new Set<string>();
+
+  // Add protected colours (up to maxColors).
+  for (const entry of protectedEntries) {
+    if (reducedPalette.length >= maxColors) break;
+    if (!addedCodes.has(entry.color.code)) {
+      reducedPalette.push(entry.color);
+      addedCodes.add(entry.color.code);
+    }
+  }
+
+  // Fill remaining slots with non-protected colours by usage.
+  for (const entry of nonProtectedEntries) {
+    if (reducedPalette.length >= maxColors) break;
+    if (!addedCodes.has(entry.color.code)) {
+      reducedPalette.push(entry.color);
+      addedCodes.add(entry.color.code);
+    }
+  }
 
   // Build a Lab cache for the reduced palette (subset of the original cache)
   const reducedLabCache = new Map<string, Lab>();
